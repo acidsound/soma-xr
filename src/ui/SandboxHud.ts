@@ -215,9 +215,7 @@ export class SandboxHud {
       'obstacle-click-mode-btn',
       () => this.callbacks.onToggleObstacleClickMode(),
     );
-    this.ttsBtnEl = this.createUtilButton('TTS ON', 'tts-toggle', () =>
-      this.callbacks.onToggleTts(),
-    );
+    this.ttsBtnEl = this.createUtilButton('TTS OFF', 'tts-toggle', () => this.callbacks.onToggleTts());
     this.gazeBtnEl = this.createUtilButton('시선 ON', 'gaze-toggle', () =>
       this.callbacks.onToggleGazeTracking(),
     );

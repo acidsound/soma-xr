@@ -76,7 +76,7 @@ class SomaPlaygroundSandbox extends xb.Script {
   private currentGazeMode: GazeMode = 'lock_eyes';
 
   private obstacleClickMode: 'sit' | 'vault' = 'sit';
-  private ttsEnabled = true;
+  private ttsEnabled = false;
   private gazeEnabled = true;
   private spatialCardVisible = false;
   private isBusy = false;

@@ -86,7 +86,9 @@ export class VrmAvatarController extends THREE.Group {
     this.name = 'AvatarControllerRoot';
     this.activePersona = initialPersona;
     this.proceduralAvatar = new ProceduralVrmAvatar(initialPersona);
-    this.add(this.proceduralAvatar);
+    // The procedural rig is kept for pose/expression plumbing only. The initial
+    // screen must show mech_girl.vrm alone, so it is never added to the scene.
+    this.proceduralAvatar.visible = false;
     this.lookAtAnchor.position.set(0, 1.5, 2.0);
   }
 
@@ -236,7 +238,8 @@ export class VrmAvatarController extends THREE.Group {
 
   public resetToBuiltinAvatar(): AvatarRuntimeStatus {
     this.clearExternalVrm();
-    this.proceduralAvatar.visible = true;
+    // Never reveal the procedural rig on screen; mech_girl.vrm is the only avatar.
+    this.proceduralAvatar.visible = false;
     this.smoothedBones.clear();
     this.onRuntimeChanged?.();
     return this.getRuntimeStatus();
