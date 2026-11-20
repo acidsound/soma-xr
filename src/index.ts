@@ -33,6 +33,40 @@ import { SpatialSanctuaryUI } from './ui/SpatialSanctuaryUI';
 import { SandboxHud } from './ui/SandboxHud';
 import { TtsLipSyncPlayer, requestNpcResponse } from './services/apiClient';
 import { WebcamGazeTracker } from './vision/WebcamGazeTracker';
+import { XrInteractionBridge } from './xr/XrInteractionBridge';
+
+/**
+ * WebXR requires a secure context. A plain http://<LAN-IP> URL makes
+ * `navigator.xr` disappear entirely on Quest Browser, which looks like a
+ * permission failure but is actually a browser security restriction.
+ */
+function isWebXrAvailable(): boolean {
+  return window.isSecureContext && 'xr' in navigator && !!navigator.xr;
+}
+
+/**
+ * Pick a session mode before xrblocks initializes its session manager. The
+ * manager only probes the single configured mode; guessing wrong makes it
+ * dispatch UNSUPPORTED and silently fall back to the desktop simulator.
+ * VR is preferred on Quest because it does not depend on passthrough consent.
+ */
+async function resolveXrSessionMode(): Promise<XRSessionMode> {
+  const override = new URLSearchParams(window.location.search).get('xrmode');
+  if (override === 'ar') return 'immersive-ar';
+  if (override === 'vr') return 'immersive-vr';
+  if (!isWebXrAvailable()) return 'immersive-vr';
+  try {
+    if (await navigator.xr!.isSessionSupported('immersive-vr')) {
+      return 'immersive-vr';
+    }
+    if (await navigator.xr!.isSessionSupported('immersive-ar')) {
+      return 'immersive-ar';
+    }
+  } catch {
+    // Fall through to the VR default.
+  }
+  return 'immersive-vr';
+}
 
 function detectSoftwareWebGL(): boolean {
   try {
@@ -50,15 +84,27 @@ function detectSoftwareWebGL(): boolean {
 }
 
 const IS_SOFTWARE_GL = detectSoftwareWebGL();
+let selectedXrMode: XRSessionMode = 'immersive-vr';
 
 class SomaPlaygroundSandbox extends xb.Script {
   private environment!: PlaygroundEnvironment;
   private sim = new PlaygroundSimulation();
   private avatar!: VrmAvatarController;
   private spatialUI!: SpatialSanctuaryUI;
+  private xrBridge!: XrInteractionBridge;
   private hud!: SandboxHud;
   private ttsPlayer = new TtsLipSyncPlayer();
   private webcamGaze = new WebcamGazeTracker();
+
+  private readonly onXrSessionError = (event: { error: unknown }): void => {
+    const detail =
+      event.error instanceof Error
+        ? `${event.error.name}: ${event.error.message}`
+        : String(event.error);
+    this.hud.setError(
+      `XR 세션 시작 실패 (${selectedXrMode}): ${detail}`,
+    );
+  };
 
   private appState: 'title' | 'playing' | 'paused' = 'title';
   private activePersona: PersonaProfile = PERSONAS[0];
@@ -73,6 +119,7 @@ class SomaPlaygroundSandbox extends xb.Script {
   private ttsEnabled = false;
   private gazeEnabled = true;
   private spatialCardVisible = false;
+  private xrModeEngaged = false;
   private isBusy = false;
 
   // Voice recording
@@ -102,6 +149,11 @@ class SomaPlaygroundSandbox extends xb.Script {
   init(): void {
     const scene = xb.core.scene;
     const renderer = xb.core.renderer as unknown as THREE.WebGLRenderer;
+
+    xb.core.webXRSessionManager?.addEventListener(
+      xb.WebXRSessionEventType.SESSION_ERROR,
+      this.onXrSessionError,
+    );
 
     if (renderer) {
       renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -146,6 +198,33 @@ class SomaPlaygroundSandbox extends xb.Script {
       onVoiceToggle: () => void this.toggleVoiceRecording(),
     });
     this.add(this.spatialUI);
+
+    this.xrBridge = new XrInteractionBridge({
+      isPlaying: () => this.appState === 'playing',
+      isXrActive: () => this.isXrActive(),
+      onSummonUI: () => this.summonSpatialUI(),
+      onPlaygroundAction: (cmd) => this.triggerPlaygroundCommand(cmd),
+      onPlaygroundObject: (id) => this.handlePlaygroundObjectInteraction(id, false),
+      onMoveAvatar: (x, z) => {
+        // Ground select while teleport is not armed: send the NPC there.
+        this.sim.issueCommand({ type: 'move_to', targetX: x, targetZ: z });
+        this.syncAllUI();
+      },
+      onHeadPat: () => {
+        this.avatar.setEmotionAndMotion('blush', 'shy_fidget', 'shy_avert');
+        void this.sendUserMessage('(다정하게 머리를 쓰다듬어 준다)', 'head_pat');
+      },
+      onDebug: (tag, data) => {
+        void fetch('/api/xr-debug', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tag, ...data }),
+        }).catch(() => undefined);
+      },
+      onVoiceToggle: () => void this.toggleVoiceRecording(),
+      onCallAvatar: () => this.callAvatarToUser(),
+    });
+    this.add(this.xrBridge);
 
     const rootEl = document.getElementById('root') || document.body;
     this.hud = new SandboxHud(rootEl, {
@@ -201,6 +280,38 @@ class SomaPlaygroundSandbox extends xb.Script {
       },
       getAvatarStatus: () => this.avatar.getRuntimeStatus(),
       getSomaStatus: () => this.avatar.somaEngine.getStatus(),
+      getXrStatus: () => ({
+        simulatorRunning: xb.core.simulatorRunning,
+        presenting: !!xb.core.renderer?.xr?.isPresenting,
+        xrSupported: xb.core.webXRSessionManager?.isXRSupported() ?? null,
+        sessionMode: selectedXrMode,
+        secureContext: window.isSecureContext,
+        navigatorXr: isWebXrAvailable(),
+        xrModeEngaged: this.xrModeEngaged,
+        menuOpen: this.xrBridge.isMenuOpen,
+        aiming: this.xrBridge.isTeleportAiming,
+        stickTeleportAiming: this.xrBridge.isStickTeleportAiming,
+        sticks: this.xrBridge.stickState,
+        counters: this.xrBridge.debugCounters,
+        cardVisible: this.spatialUI.isCardVisible,
+        cameraPosition: (() => {
+          const p = new THREE.Vector3();
+          xb.core.camera.getWorldPosition(p);
+          return [p.x, p.y, p.z];
+        })(),
+        cameraYaw: (() => {
+          const q = new THREE.Quaternion();
+          xb.core.camera.getWorldQuaternion(q);
+          return +new THREE.Euler().setFromQuaternion(q, 'YXZ').y.toFixed(3);
+        })(),
+      }),
+      summonUI: () => this.summonSpatialUI(),
+      teleportTo: (x: number, z: number) => this.xrBridge.teleportToPoint(x, z),
+      // Synthetic thumbstick input: [x, y] with y = -1 pushed forward.
+      setSticks: (
+        left: { x: number; y: number } | null,
+        right: { x: number; y: number } | null,
+      ) => this.xrBridge.setVirtualSticks(left, right),
       resetPlayground: () => this.resetPlayground(),
     };
   }
@@ -380,14 +491,18 @@ class SomaPlaygroundSandbox extends xb.Script {
 
   onXRSessionStarted(): void {
     const isAR = xb.core.environmentBlendMode === 'alpha-blend';
+    this.xrModeEngaged = true;
     this.environment.setPassthroughMode(isAR);
     this.spatialCardVisible = true;
-    this.spatialUI.setVisible(true);
+    // Let WebXR update the headset pose for one frame before placing the card.
+    requestAnimationFrame(() => this.spatialUI.summonInFront(xb.core.camera));
     this.syncToggles();
   }
 
   onXRSessionEnded(): void {
+    this.xrModeEngaged = false;
     this.environment.setPassthroughMode(false);
+    this.syncToggles();
   }
 
   onSimulatorStarted(): void {
@@ -396,6 +511,9 @@ class SomaPlaygroundSandbox extends xb.Script {
 
   onSelectStart(event: xb.SelectEvent): void {
     if (this.appState !== 'playing') return;
+    // In explicitly-entered XR / simulator mode the bridge turns floor selects
+    // into user teleportation; plain desktop keeps "move the NPC" behaviour.
+    if (this.isXrActive()) return;
     const obj = event.surface || event.target;
     if (!obj) return;
 
@@ -479,7 +597,7 @@ class SomaPlaygroundSandbox extends xb.Script {
     this.environment.syncFromSimulation(snap, elapsed, heldBasketballPos);
 
     // Update lightweight activity / SOMA clip badges only when text changes
-    const clip = this.avatar.somaEngine.getStatus().activeClip;
+    const clip = this.avatar.somaEngine.getActiveClip();
     if (
       snap.avatar.statusLabelKo !== this.lastHudActivity ||
       clip !== this.lastHudClip
@@ -607,23 +725,114 @@ class SomaPlaygroundSandbox extends xb.Script {
 
   private toggleSpatialCard(): void {
     this.spatialCardVisible = !this.spatialCardVisible;
-    this.spatialUI.setVisible(this.spatialCardVisible);
+    if (this.spatialCardVisible && this.isXrActive()) {
+      this.spatialUI.summonInFront(xb.core.camera);
+    } else {
+      this.spatialUI.setVisible(this.spatialCardVisible);
+    }
     this.syncToggles();
   }
 
-  private async enterXrOrSimulator(): Promise<void> {
-    try {
-      const supportsAr =
-        typeof navigator !== 'undefined' &&
-        'xr' in navigator &&
-        (await navigator.xr?.isSessionSupported('immersive-ar'));
-      if (supportsAr && xb.core.xrButton?.xrButtonElement) {
-        xb.core.xrButton.xrButtonElement.click();
-      } else if (!xb.core.simulatorRunning) {
-        await xb.core.startSimulator();
+  private summonSpatialUI(): void {
+    this.spatialCardVisible = true;
+    this.spatialUI.summonInFront(xb.core.camera);
+    this.syncToggles();
+  }
+
+  private callAvatarToUser(): void {
+    const head = new THREE.Vector3();
+    xb.core.camera.getWorldPosition(head);
+    this.sim.issueCommand({
+      type: 'move_to',
+      targetX: head.x,
+      targetZ: head.z,
+    });
+    this.syncAllUI();
+  }
+
+  private isXrActive(): boolean {
+    return this.xrModeEngaged || !!xb.core.renderer?.xr?.isPresenting;
+  }
+
+  private getXrLaunchState(): { label: string; hint: string } {
+    const manager = xb.core.webXRSessionManager;
+    if (manager?.currentSession) {
+      return {
+        label: 'Exit XR',
+        hint: '왼스틱 이동 · 오른스틱 좌우 스냅턴 · 뒤로 당겨 텔레포트',
+      };
+    }
+    if (!window.isSecureContext) {
+      return {
+        label: 'WebXR 사용 불가',
+        hint: '현재 HTTP 주소 – HTTPS 또는 localhost 필요',
+      };
+    }
+    if (!isWebXrAvailable()) {
+      return {
+        label: 'XR 시뮬레이터',
+        hint: '이 브라우저에는 WebXR API가 없습니다',
+      };
+    }
+    if (manager?.isXRSupported() !== true) {
+      return {
+        label: 'XR 시뮬레이터',
+        hint: '헤드셋 미연결 – 시뮬레이터로 미리보기',
+      };
+    }
+    return {
+      label: `Enter XR (${selectedXrMode === 'immersive-ar' ? 'AR' : 'VR'})`,
+      hint: 'WebXR 세션 시작',
+    };
+  }
+
+  private enterXrOrSimulator(): void {
+    // WebXR is gated on a secure context. Quest Browser does not even expose
+    // navigator.xr on http://<LAN-IP>, so this is the first thing to check.
+    if (!window.isSecureContext) {
+      this.hud.setError(
+        'WebXR은 HTTPS 또는 localhost에서만 동작합니다. 현재 주소는 안전한 컨텍스트가 아니어서 Quest Browser가 XR API를 제공하지 않습니다. ' +
+          'Tailscale HTTPS(https://<노드>.<테일넷>.ts.net), adb reverse 후 http://localhost:3000, 또는 HTTPS 터널로 접속해 주세요.',
+      );
+      return;
+    }
+
+    const manager = xb.core.webXRSessionManager;
+    if (manager?.currentSession) {
+      void manager.endSession();
+      return;
+    }
+    if (isWebXrAvailable() && manager?.isXRSupported() === true) {
+      try {
+        // Keep this call synchronous inside the click handler: WebXR
+        // requestSession requires transient user activation.
+        manager.startSession();
+      } catch (err) {
+        this.hud.setError(
+          err instanceof Error ? err.message : 'XR 세션 요청에 실패했습니다.',
+        );
       }
+      // onXRSessionStarted() owns xrModeEngaged and card placement.
+      return;
+    }
+
+    // Desktop browser with no headset: keep the simulator as the XR preview so
+    // stick locomotion and controller interaction stay testable without one.
+    if (isWebXrAvailable()) {
+      this.hud.setError(
+        '연결된 WebXR 기기가 없어 시뮬레이터로 실행합니다. 헤드셋에서는 immersive-vr 권한을 확인하고, ' +
+          'AR이 필요하면 주소에 ?xrmode=ar 을 붙여 다시 열어 주세요.',
+      );
+    }
+    void this.startSimulatorFallback();
+  }
+
+  private async startSimulatorFallback(): Promise<void> {
+    try {
+      if (!xb.core.simulatorRunning) await xb.core.startSimulator();
+      this.xrModeEngaged = true;
       this.spatialCardVisible = true;
-      this.spatialUI.setVisible(true);
+      this.spatialUI.summonInFront(xb.core.camera);
       this.syncToggles();
     } catch (err) {
       this.hud.setError(
@@ -985,9 +1194,14 @@ class SomaPlaygroundSandbox extends xb.Script {
       gazeMode: this.currentGazeMode,
       obstacleClickMode: this.obstacleClickMode,
     });
+    this.hud.setXrLaunchState(this.getXrLaunchState());
   }
 
   dispose(): void {
+    xb.core.webXRSessionManager?.removeEventListener(
+      xb.WebXRSessionEventType.SESSION_ERROR,
+      this.onXrSessionError,
+    );
     this.stopVoiceRecording();
     this.ttsPlayer.dispose();
     this.webcamGaze.stop();
@@ -997,20 +1211,34 @@ class SomaPlaygroundSandbox extends xb.Script {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  const options = new xb.Options();
-  options.antialias = !IS_SOFTWARE_GL;
-  options.usePostprocessing = false;
-  options.setFramebufferScaleFactor(1);
-  options.enableReticles();
-  options.enableHands();
-  options.xrButton.enabled = false;
-  options.simulator.instructions.enabled = false;
-  options.simulator.instructions.overlayEnabled = false;
-  options.setAppTitle('SOMA·Heart XR Playground Sandbox');
-  options.setAppDescription(
-    'MotionBricks SOMA & mech_girl.vrm 기반 놀이터 인터랙션 · 실시간 감정 LLM · 음성 대화 · 시선 추적 XR 샌드박스',
-  );
+  void (async () => {
+    const options = new xb.Options();
+    options.antialias = !IS_SOFTWARE_GL;
+    options.usePostprocessing = false;
+    // A modest XR render-scale reduction buys steadier 72/90 Hz frame pacing on
+    // standalone headsets while remaining visually clean on this stylized scene.
+    options.setFramebufferScaleFactor(0.9);
+    options.enableReticles();
+    options.enableGestures();
+    // Fist detection does not need 30 Hz sampling; 60 ms keeps it responsive
+    // without adding avoidable joint-matrix work to every render frame.
+    options.gestures.updateIntervalMs = 60;
+    options.xrSessionMode = await resolveXrSessionMode();
+    selectedXrMode = options.xrSessionMode;
+    // Keep the session request minimal for standalone headsets. xrblocks
+    // defaults include bounded-floor/unbounded, and Quest Browser rejects the
+    // whole request with NotSupportedError when an optional feature is unknown.
+    options.webxrRequiredFeatures = [];
+    options.webxrOptionalFeatures = ['local-floor', 'hand-tracking'];
+    options.xrButton.enabled = false;
+    options.simulator.instructions.enabled = false;
+    options.simulator.instructions.overlayEnabled = false;
+    options.setAppTitle('SOMA·Heart XR Playground Sandbox');
+    options.setAppDescription(
+      'MotionBricks SOMA & mech_girl.vrm 기반 놀이터 인터랙션 · 실시간 감정 LLM · 음성 대화 · 시선 추적 XR 샌드박스',
+    );
 
-  xb.add(new SomaPlaygroundSandbox());
-  xb.init(options);
+    xb.add(new SomaPlaygroundSandbox());
+    void xb.init(options);
+  })();
 });

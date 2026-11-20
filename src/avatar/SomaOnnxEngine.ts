@@ -84,6 +84,10 @@ export class SomaOnnxEngine {
     return this.activeStyle;
   }
 
+  public getActiveClip(): string {
+    return this.sequencer?.getActiveClipLabel() || `procedural:${this.activeStyle}`;
+  }
+
   public getStatus(): SomaRuntimeStatus {
     return {
       mode: this.executionMode,

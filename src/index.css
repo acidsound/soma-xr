@@ -789,3 +789,50 @@ label:focus-visible {
   }
 }
 
+
+/* ================= PERSISTENT XR LAUNCHER ================= */
+/* Always mounted above every HUD layer, including the title screen, so the
+   headset browser always has an obvious way to request a WebXR session. */
+.sh-xr-launch {
+  position: fixed;
+  right: max(16px, env(safe-area-inset-right));
+  bottom: max(16px, env(safe-area-inset-bottom));
+  z-index: 10000;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 148px;
+  padding: 10px 16px;
+  border: 1px solid rgba(249, 168, 212, 0.6);
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(76, 29, 149, 0.94), rgba(190, 24, 93, 0.92));
+  color: #fff7fb;
+  font: inherit;
+  cursor: pointer;
+  pointer-events: auto;
+  box-shadow: 0 8px 24px rgba(12, 6, 24, 0.55);
+  text-align: left;
+}
+
+.sh-xr-launch:hover {
+  filter: brightness(1.12);
+}
+
+.sh-xr-launch-label {
+  font-size: 0.94rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.sh-xr-launch-hint {
+  font-size: 0.66rem;
+  color: rgba(255, 241, 250, 0.78);
+  max-width: 210px;
+  line-height: 1.25;
+}
+
+.sh-xr-launch.is-unavailable {
+  border-color: rgba(248, 113, 113, 0.7);
+  background: linear-gradient(135deg, rgba(69, 10, 10, 0.95), rgba(127, 29, 29, 0.92));
+}

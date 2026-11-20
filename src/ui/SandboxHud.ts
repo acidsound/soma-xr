@@ -85,6 +85,7 @@ export class SandboxHud {
   private gazeBtnEl!: HTMLButtonElement;
   private webcamGazeBtnEl!: HTMLButtonElement;
   private spatialCardBtnEl!: HTMLButtonElement;
+  private xrLaunchBtnEl!: HTMLButtonElement;
   private cloudOnnxBtnEl!: HTMLButtonElement;
 
   private vrmStatusEl!: HTMLElement;
@@ -354,6 +355,17 @@ export class SandboxHud {
       ?.addEventListener('click', () => this.callbacks.onReturnTitle());
 
     this.root.appendChild(this.pauseModal);
+
+    // Persistent WebXR launcher. Unlike the title/top-bar entries this is
+    // always mounted, so it is discoverable on a headset browser at any point.
+    this.xrLaunchBtnEl = document.createElement('button');
+    this.xrLaunchBtnEl.type = 'button';
+    this.xrLaunchBtnEl.className = 'sh-xr-launch';
+    this.xrLaunchBtnEl.dataset.testid = 'xr-launch-btn';
+    this.xrLaunchBtnEl.innerHTML =
+      '<span class="sh-xr-launch-label">Enter XR</span><span class="sh-xr-launch-hint"></span>';
+    this.xrLaunchBtnEl.addEventListener('click', () => this.callbacks.onEnterXR());
+    this.root.appendChild(this.xrLaunchBtnEl);
 
     this.switchTab('chat');
   }
@@ -656,6 +668,16 @@ export class SandboxHud {
     if (interimText) {
       this.chatInputEl.value = interimText;
     }
+  }
+
+  /** Updates the always-visible WebXR launcher label and diagnostic hint. */
+  public setXrLaunchState(state: { label: string; hint: string }): void {
+    const label = this.xrLaunchBtnEl.querySelector<HTMLElement>('.sh-xr-launch-label');
+    const hint = this.xrLaunchBtnEl.querySelector<HTMLElement>('.sh-xr-launch-hint');
+    if (label) label.textContent = state.label;
+    if (hint) hint.textContent = state.hint;
+    this.xrLaunchBtnEl.title = state.hint;
+    this.xrLaunchBtnEl.classList.toggle('is-unavailable', state.hint.includes('HTTPS'));
   }
 
   public setToggles(params: {

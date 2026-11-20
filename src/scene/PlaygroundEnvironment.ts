@@ -324,7 +324,9 @@ export class PlaygroundEnvironment extends THREE.Group {
     sun.position.set(8.5, 13.5, 7.5);
     if (!options.isSoftwareGl) {
       sun.castShadow = true;
-      sun.shadow.mapSize.set(2048, 2048);
+      // 1024² is enough for this stylized park and halves shadow-map fill cost
+      // per eye on standalone headsets compared with the original 2048² map.
+      sun.shadow.mapSize.set(1024, 1024);
       sun.shadow.camera.near = 1;
       sun.shadow.camera.far = 42;
       const d = 12.5;

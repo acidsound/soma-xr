@@ -18,6 +18,7 @@ import { DEFAULT_VRM_URL } from '../constants';
 import {
   computeGazeAngles,
   mapEmotionToExpressionWeights,
+  type ExpressionWeights,
 } from '../sim/romanceEngine';
 import {
   SOMA_JOINT_NAMES,
@@ -43,6 +44,7 @@ const _tmpQuat = new THREE.Quaternion();
 const _qPitch = new THREE.Quaternion();
 const _qYaw = new THREE.Quaternion();
 const _qTarget = new THREE.Quaternion();
+const _invAvatarQuat = new THREE.Quaternion();
 
 export class VrmAvatarController extends THREE.Group {
   public readonly somaEngine = new SomaOnnxEngine();
@@ -78,6 +80,8 @@ export class VrmAvatarController extends THREE.Group {
     blush: 0.15,
   };
   private smoothedBones = new Map<string, { x: number; y: number; z: number }>();
+  private cachedExpressionEmotion: NpcEmotionType | null = null;
+  private cachedExpressionWeights: ExpressionWeights | null = null;
 
   public onRuntimeChanged?: () => void;
 
@@ -309,8 +313,8 @@ export class VrmAvatarController extends THREE.Group {
     // Transform target position into avatar-local space so gaze angles remain natural
     // regardless of which direction the avatar faces across the playground
     _toTarget.copy(_targetWorldPos).sub(_headWorldPos);
-    const invAvatarQuat = this.quaternion.clone().invert();
-    _toTarget.applyQuaternion(invAvatarQuat);
+    _invAvatarQuat.copy(this.quaternion).invert();
+    _toTarget.applyQuaternion(_invAvatarQuat);
 
     // Reduce gaze head turn while actively vaulting / climbing / walking so motion looks natural
     const gazeWeight =
@@ -414,7 +418,16 @@ export class VrmAvatarController extends THREE.Group {
       this.blinkAmount = 0;
     }
 
-    const targetExp = mapEmotionToExpressionWeights(this.currentNpcEmotion);
+    if (
+      !this.cachedExpressionWeights ||
+      this.cachedExpressionEmotion !== this.currentNpcEmotion
+    ) {
+      this.cachedExpressionWeights = mapEmotionToExpressionWeights(
+        this.currentNpcEmotion,
+      );
+      this.cachedExpressionEmotion = this.currentNpcEmotion;
+    }
+    const targetExp = this.cachedExpressionWeights;
     const expLambda = 7;
     this.currentExpressions.happy = THREE.MathUtils.damp(
       this.currentExpressions.happy,

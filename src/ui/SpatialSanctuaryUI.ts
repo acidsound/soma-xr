@@ -1,4 +1,5 @@
 import * as xb from 'xrblocks';
+import * as THREE from 'three';
 import type {
   PlaygroundCommandType,
   RelationshipState,
@@ -11,6 +12,10 @@ export interface SpatialUIActions {
   onPlaygroundAction: (cmd: PlaygroundCommandType) => void;
   onVoiceToggle: () => void;
 }
+
+const _summonCameraPos = new THREE.Vector3();
+const _summonCameraQuat = new THREE.Quaternion();
+const _summonForward = new THREE.Vector3();
 
 /**
  * World-space XR Blocks Spatial UI Card anchored inside the playground
@@ -134,6 +139,36 @@ export class SpatialSanctuaryUI extends xb.Script {
     this.card.rotation.y = -0.38;
     this.card.visible = false;
     this.add(this.card);
+  }
+
+  public get isCardVisible(): boolean {
+    return this.card.visible;
+  }
+
+  /**
+   * Places the card roughly 1.4 m in front of the headset, at a comfortable
+   * slightly-below-eye height, facing the user. Used by the wrist menu, the
+   * HUD "XR 카드" button and the C hotkey.
+   */
+  public summonInFront(camera: THREE.Camera): void {
+    camera.getWorldPosition(_summonCameraPos);
+    camera.getWorldQuaternion(_summonCameraQuat);
+    _summonForward.set(0, 0, -1).applyQuaternion(_summonCameraQuat);
+    _summonForward.y = 0;
+    if (_summonForward.lengthSq() < 1e-6) _summonForward.set(0, 0, -1);
+    _summonForward.normalize();
+
+    this.card.position
+      .copy(_summonCameraPos)
+      .addScaledVector(_summonForward, 1.4);
+    this.card.position.y = Math.max(1.2, _summonCameraPos.y - 0.12);
+    this.card.lookAt(
+      _summonCameraPos.x,
+      this.card.position.y,
+      _summonCameraPos.z,
+    );
+    this.card.updateMatrixWorld(true);
+    this.setVisible(true);
   }
 
   public setVisible(visible: boolean): void {

@@ -3,6 +3,17 @@
  * Ported from https://huggingface.co/spaces/monoradio/motionbricks-live/blob/main/viewer/live.html
  * and generalized to work in vrm.scene-local space so rotating/moving the parent
  * VrmAvatarController across the playground never distorts bone orientations.
+ *
+ * Performance: the per-frame path is allocation-free. The original lifted every
+ * bone target into world space (`sceneWorldQ * localTarget`) and then divided by
+ * the parent's *world* quaternion (`parent.getWorldQuaternion()` after a full
+ * `updateWorldMatrix(true, false)` ancestor recompute). Because every bone lives
+ * under vrm.scene, `parentWorldQ === sceneWorldQ * parentSceneLocalQ`, so the
+ * sceneWorldQ factor cancels exactly:
+ *   node.quaternion = parentSceneLocalQ^-1 * localTarget.
+ * We therefore keep the identical scene-local target math but read the parent's
+ * scene-local orientation from a cache updated as we walk the (parent-first)
+ * bone list — no world-matrix recomputes, no matrix decompositions, no garbage.
  */
 
 import * as THREE from 'three';
@@ -16,6 +27,13 @@ interface MappedBone {
   childVrmName: VRMHumanBoneName | null;
   TrestLocal: THREE.Quaternion;
   C: THREE.Quaternion;
+  /** Nearest mapped ancestor (used to read this frame's parent orientation). */
+  parentMapped: MappedBone | null;
+  /** Rest orientation of the unmapped bones between this bone and parentMapped
+   *  (or up to vrm.scene when parentMapped is null), composed top-down. */
+  intermediateRestQ: THREE.Quaternion;
+  /** This bone's orientation relative to vrm.scene, refreshed every frame. */
+  sceneLocal: THREE.Quaternion;
 }
 
 const SOMA_VRM_MAP: Array<[VRMHumanBoneName, string, VRMHumanBoneName | null]> = [
@@ -44,13 +62,12 @@ const SOMA_VRM_MAP: Array<[VRMHumanBoneName, string, VRMHumanBoneName | null]> =
 ];
 
 const _up = new THREE.Vector3(0, 1, 0);
-const _sceneWorldQ = new THREE.Quaternion();
+const _identityQ = new THREE.Quaternion();
 const _localTargetQ = new THREE.Quaternion();
-const _worldQ = new THREE.Quaternion();
-const _parentQ = new THREE.Quaternion();
+const _parentSceneLocalQ = new THREE.Quaternion();
+const _tmpQ = new THREE.Quaternion();
 const _gazeQ = new THREE.Quaternion();
 const _gazeEuler = new THREE.Euler(0, 0, 0, 'YXZ');
-const _tmpQ = new THREE.Quaternion();
 
 function v3(a: readonly number[]): THREE.Vector3 {
   return new THREE.Vector3(a[0], a[1], a[2]);
@@ -75,10 +92,14 @@ export class SomaVrmRetargeter {
   private readonly hipsNode: THREE.Object3D | null;
   private readonly hipScaleLocal: number;
   private readonly restHipYLocal: number;
+  private readonly worldPos: Float64Array;
+  private readonly worldQuat: Float64Array;
 
   constructor(sk: SomaSkeleton, vrm: VRM) {
     this.sk = sk;
     this.vrm = vrm;
+    this.worldPos = new Float64Array(sk.J * 3);
+    this.worldQuat = new Float64Array(sk.J * 4);
 
     // Ensure VRM world matrices are up to date in rest T-pose
     vrm.scene.updateMatrixWorld(true);
@@ -128,6 +149,9 @@ export class SomaVrmRetargeter {
         childVrmName,
         TrestLocal: lquat(vrmName),
         C: new THREE.Quaternion(),
+        parentMapped: null,
+        intermediateRestQ: new THREE.Quaternion(),
+        sceneLocal: new THREE.Quaternion(),
       });
     }
 
@@ -160,6 +184,35 @@ export class SomaVrmRetargeter {
       }
     }
 
+    // Precompute the scene-local parent chain for the allocation-free hot path.
+    const byNode = new Map<THREE.Object3D, MappedBone>(
+      mapped.map((m) => [m.node, m]),
+    );
+    for (const x of mapped) {
+      let p = x.node.parent;
+      const chain: THREE.Object3D[] = [];
+      while (p && p !== vrm.scene) {
+        const e = byNode.get(p);
+        if (e) {
+          x.parentMapped = e;
+          break;
+        }
+        chain.push(p);
+        p = p.parent;
+      }
+      // chain is bottom-up; compose the unmapped rest quaternions top-down.
+      for (let k = chain.length - 1; k >= 0; k--) {
+        x.intermediateRestQ.multiply(chain[k].quaternion);
+      }
+    }
+    // Seed rest scene-local orientations (parents precede children in the map).
+    for (const x of mapped) {
+      _parentSceneLocalQ
+        .copy(x.parentMapped ? x.parentMapped.sceneLocal : _identityQ)
+        .multiply(x.intermediateRestQ);
+      x.sceneLocal.copy(_parentSceneLocalQ).multiply(x.node.quaternion);
+    }
+
     this.bones = mapped;
     this.hipsNode = getNode('hips');
     const vrmHipYLocal = this.hipsNode ? lpos('hips').y : 0.9;
@@ -177,18 +230,14 @@ export class SomaVrmRetargeter {
     flatPose: Float32Array,
     gazeOverlay?: { headYaw: number; headPitch: number },
   ): void {
-    const w = this.sk.world(flatPose);
-    this.vrm.scene.updateWorldMatrix(true, false);
-    this.vrm.scene.getWorldQuaternion(_sceneWorldQ);
+    this.sk.worldInto(flatPose, this.worldPos, this.worldQuat);
+    const wq = this.worldQuat;
 
     for (const x of this.bones) {
-      _tmpQ.set(
-        w[x.somaIndex].q[0],
-        w[x.somaIndex].q[1],
-        w[x.somaIndex].q[2],
-        w[x.somaIndex].q[3],
-      );
-      // Compute target orientation in vrm.scene-local space
+      const o = x.somaIndex * 4;
+      _tmpQ.set(wq[o], wq[o + 1], wq[o + 2], wq[o + 3]);
+
+      // Target orientation in vrm.scene-local space (identical to the original).
       _localTargetQ
         .copy(this.G)
         .multiply(_tmpQ)
@@ -196,16 +245,17 @@ export class SomaVrmRetargeter {
         .multiply(x.C)
         .multiply(x.TrestLocal);
 
-      // Lift into world space using vrm.scene's current world rotation
-      _worldQ.copy(_sceneWorldQ).multiply(_localTargetQ);
+      // Parent's scene-local orientation: fresh for mapped ancestors (walked
+      // parent-first), constant rest chain for unmapped ancestors.
+      _parentSceneLocalQ
+        .copy(x.parentMapped ? x.parentMapped.sceneLocal : _identityQ)
+        .multiply(x.intermediateRestQ);
 
-      if (x.node.parent) {
-        x.node.parent.updateWorldMatrix(true, false);
-        x.node.parent.getWorldQuaternion(_parentQ);
-        x.node.quaternion.copy(_parentQ.invert().multiply(_worldQ));
-      } else {
-        x.node.quaternion.copy(_localTargetQ);
-      }
+      // node.quaternion = parentSceneLocal^-1 * localTarget  (sceneWorldQ cancels)
+      x.node.quaternion
+        .copy(_parentSceneLocalQ)
+        .invert()
+        .multiply(_localTargetQ);
 
       // Layer real-time gaze tracking smoothly onto neck & head
       if (gazeOverlay && (x.vrmName === 'neck' || x.vrmName === 'head')) {
@@ -221,14 +271,16 @@ export class SomaVrmRetargeter {
         x.node.quaternion.multiply(_gazeQ);
       }
 
-      x.node.updateMatrix();
-      x.node.updateWorldMatrix(false, false);
+      // Refresh this bone's scene-local orientation for its children.
+      x.sceneLocal.copy(_parentSceneLocalQ).multiply(x.node.quaternion);
     }
 
     if (this.hipsNode) {
-      const hipY = Math.max(this.restHipYLocal * 0.45, w[0].p[1] * this.hipScaleLocal);
+      const hipY = Math.max(
+        this.restHipYLocal * 0.45,
+        this.worldPos[1] * this.hipScaleLocal,
+      );
       this.hipsNode.position.set(0, hipY, 0);
-      this.hipsNode.updateMatrix();
     }
   }
 }

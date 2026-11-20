@@ -237,6 +237,58 @@ export class SomaSkeleton {
   }
 
   /**
+   * Zero-allocation forward kinematics. Writes world positions into `outPos`
+   * (J*3) and world quaternions (xyzw) into `outQuat` (J*4). Mathematically
+   * identical to `world()` but allocates nothing per call — used on the
+   * per-frame retargeting hot path.
+   */
+  public worldInto(
+    flat: Float32Array,
+    outPos: Float32Array | Float64Array,
+    outQuat: Float32Array | Float64Array,
+  ): void {
+    for (let j = 0; j < this.J; j++) {
+      const o = j * 7;
+      const lx = flat[o];
+      const ly = flat[o + 1];
+      const lz = flat[o + 2];
+      const qx = flat[o + 3];
+      const qy = flat[o + 4];
+      const qz = flat[o + 5];
+      const qw = flat[o + 6];
+      const p = this.parents[j];
+      const po = j * 3;
+      const qo = j * 4;
+      if (p < 0) {
+        outPos[po] = lx;
+        outPos[po + 1] = ly;
+        outPos[po + 2] = lz;
+        outQuat[qo] = qx;
+        outQuat[qo + 1] = qy;
+        outQuat[qo + 2] = qz;
+        outQuat[qo + 3] = qw;
+      } else {
+        const pp = p * 3;
+        const pq = p * 4;
+        const px = outQuat[pq];
+        const py = outQuat[pq + 1];
+        const pz = outQuat[pq + 2];
+        const pw = outQuat[pq + 3];
+        const tx = 2 * (py * lz - pz * ly);
+        const ty = 2 * (pz * lx - px * lz);
+        const tz = 2 * (px * ly - py * lx);
+        outPos[po] = outPos[pp] + lx + pw * tx + (py * tz - pz * ty);
+        outPos[po + 1] = outPos[pp + 1] + ly + pw * ty + (pz * tx - px * tz);
+        outPos[po + 2] = outPos[pp + 2] + lz + pw * tz + (px * ty - py * tx);
+        outQuat[qo] = pw * qx + px * qw + py * qz - pz * qy;
+        outQuat[qo + 1] = pw * qy - px * qz + py * qw + pz * qx;
+        outQuat[qo + 2] = pw * qz + px * qy - py * qx + pz * qw;
+        outQuat[qo + 3] = pw * qw - px * qx - py * qy - pz * qz;
+      }
+    }
+  }
+
+  /**
    * Strips global XZ translation and yaw heading from a raw SOMA pose so the
    * pose is centered at XZ=(0,0) facing canonical +Z while preserving root Y
    * height, hip pitch/roll, and all local joint rotations.
@@ -465,6 +517,17 @@ export class Soma77MotionSequencer {
   private targetPose: Float32Array;
   private activeClipLabel = 'soma:idle';
 
+  // Sequence tables are built once. The old hot path rebuilt small arrays with
+  // spread syntax every frame (vault/kick/pickup/throw/sandbox), which produced
+  // steady GC pressure and visible frame hitches in headset rendering.
+  private vaultSeq: Float32Array[] = [];
+  private hurdleSeq: Float32Array[] = [];
+  private kickSeq: Float32Array[] = [];
+  private pickupSeq: Float32Array[] = [];
+  private throwSeq: Float32Array[] = [];
+  private sandboxSeq: Float32Array[] = [];
+  private sitPose: Float32Array = new Float32Array(0);
+
   // Optional live ONNX worker stream
   private liveOnnxFrames: Float32Array[] = [];
   private liveOnnxTime = 0;
@@ -488,6 +551,55 @@ export class Soma77MotionSequencer {
 
     this.walkLoop = this.buildTimedGaitLoop(walkRaw, [0.0, 0.06, 0.13, 0.2]);
     this.runLoop = this.buildTimedGaitLoop(runRaw, [0.0, 0.12, 0.26, 0.4]);
+
+    const idleFrames = dataset.styles.idle?.frames || [this.sk.reference];
+    const crouchFrames =
+      dataset.styles.crouch_idle?.frames ||
+      dataset.styles.crouch?.frames ||
+      idleFrames;
+    const sitPrim = dataset.prims.ardy_sit?.keyframes;
+    const vaultPrim =
+      dataset.prims.kimodo_vault?.keyframes ||
+      dataset.prims.ardy_vault?.keyframes ||
+      dataset.prims.ardy_jump?.keyframes;
+    const hurdlePrim = dataset.prims.kimodo_hurdle?.keyframes || vaultPrim;
+    const kickAct = dataset.actions.kick?.keyframes;
+    const pickupAct = dataset.actions.pickup?.keyframes;
+    const idle0 = idleFrames[0];
+    const crouch0 = crouchFrames[0];
+    const sit0 = sitPrim?.[1] || sitPrim?.[0] || crouch0;
+    this.sitPose = sit0;
+
+    if (vaultPrim && vaultPrim.length >= 2) {
+      this.vaultSeq = [idle0, ...vaultPrim, idle0];
+    }
+    if (hurdlePrim && hurdlePrim.length >= 2) {
+      this.hurdleSeq = [idle0, ...hurdlePrim, idle0];
+    }
+    if (kickAct && kickAct.length >= 2) {
+      this.kickSeq = [idle0, ...kickAct, idle0];
+    }
+    if (pickupAct && pickupAct.length >= 2) {
+      this.pickupSeq = [
+        idle0,
+        pickupAct[0],
+        pickupAct[Math.min(2, pickupAct.length - 1)],
+        pickupAct[Math.min(4, pickupAct.length - 1)],
+        pickupAct[pickupAct.length - 1],
+      ];
+      this.sandboxSeq = [
+        crouch0,
+        pickupAct[0],
+        pickupAct[Math.min(3, pickupAct.length - 1)],
+        crouch0,
+      ];
+    } else {
+      this.pickupSeq = [idle0, crouch0, idle0];
+      this.sandboxSeq = [crouch0];
+    }
+    const holdStance =
+      pickupAct && pickupAct.length > 0 ? pickupAct[pickupAct.length - 1] : idle0;
+    this.throwSeq = [holdStance, holdStance, idle0];
   }
 
   private buildTimedGaitLoop(
@@ -549,15 +661,6 @@ export class Soma77MotionSequencer {
       this.dataset.styles.crouch_idle?.frames ||
       this.dataset.styles.crouch?.frames ||
       idleFrames;
-    const sitPrim = this.dataset.prims.ardy_sit?.keyframes;
-    const vaultPrim =
-      this.dataset.prims.kimodo_vault?.keyframes ||
-      this.dataset.prims.ardy_vault?.keyframes ||
-      this.dataset.prims.ardy_jump?.keyframes;
-    const hurdlePrim =
-      this.dataset.prims.kimodo_hurdle?.keyframes || vaultPrim;
-    const kickAct = this.dataset.actions.kick?.keyframes;
-    const pickupAct = this.dataset.actions.pickup?.keyframes;
 
     switch (params.activity) {
       case 'walk':
@@ -588,7 +691,7 @@ export class Soma77MotionSequencer {
               : params.activity === 'sit_swing'
                 ? 'ardy:ardy_sit (swing)'
                 : 'ardy:ardy_sit (bench)';
-        const sitPose = sitPrim?.[1] || sitPrim?.[0] || crouchFrames[0];
+        const sitPose = this.sitPose;
         if (params.phase < 1 && params.activity !== 'slide_down') {
           this.sk.interpolatePoses(idleFrames[0], sitPose, params.phase, this.targetPose);
         } else {
@@ -603,12 +706,8 @@ export class Soma77MotionSequencer {
           params.activity === 'vault_box'
             ? 'kimodo:vault (vault box)'
             : 'kimodo:vault (bench)';
-        if (vaultPrim && vaultPrim.length >= 2) {
-          this.sampleSequence(
-            [idleFrames[0], ...vaultPrim, idleFrames[0]],
-            params.phase,
-            this.targetPose,
-          );
+        if (this.vaultSeq.length > 0) {
+          this.sampleSequence(this.vaultSeq, params.phase, this.targetPose);
         } else {
           this.sampleTimedCyclic(this.runLoop, params.phase, this.targetPose);
         }
@@ -617,12 +716,8 @@ export class Soma77MotionSequencer {
 
       case 'vault_seesaw': {
         this.activeClipLabel = 'kimodo:hurdle (seesaw)';
-        if (hurdlePrim && hurdlePrim.length >= 2) {
-          this.sampleSequence(
-            [idleFrames[0], ...hurdlePrim, idleFrames[0]],
-            params.phase,
-            this.targetPose,
-          );
+        if (this.hurdleSeq.length > 0) {
+          this.sampleSequence(this.hurdleSeq, params.phase, this.targetPose);
         } else {
           this.sampleTimedCyclic(this.runLoop, params.phase, this.targetPose);
         }
@@ -631,12 +726,8 @@ export class Soma77MotionSequencer {
 
       case 'kick_ball': {
         this.activeClipLabel = 'ardy:kick';
-        if (kickAct && kickAct.length >= 2) {
-          this.sampleSequence(
-            [idleFrames[0], ...kickAct, idleFrames[0]],
-            params.phase,
-            this.targetPose,
-          );
+        if (this.kickSeq.length > 0) {
+          this.sampleSequence(this.kickSeq, params.phase, this.targetPose);
         } else {
           this.sampleTimedCyclic(this.runLoop, params.phase, this.targetPose);
         }
@@ -645,49 +736,21 @@ export class Soma77MotionSequencer {
 
       case 'pickup_ball': {
         this.activeClipLabel = 'ardy:pickup (basketball)';
-        if (pickupAct && pickupAct.length >= 2) {
-          const bend0 = pickupAct[0];
-          const bendMid = pickupAct[Math.min(2, pickupAct.length - 1)];
-          const rise0 = pickupAct[Math.min(4, pickupAct.length - 1)];
-          const riseEnd = pickupAct[pickupAct.length - 1];
-          this.sampleSequence(
-            [idleFrames[0], bend0, bendMid, rise0, riseEnd],
-            params.phase,
-            this.targetPose,
-          );
-        } else {
-          this.sampleSequence(
-            [idleFrames[0], crouchFrames[0], idleFrames[0]],
-            params.phase,
-            this.targetPose,
-          );
-        }
+        this.sampleSequence(this.pickupSeq, params.phase, this.targetPose);
         break;
       }
 
       case 'throw_ball': {
         this.activeClipLabel = 'ardy:pickup + throw';
-        const holdStance =
-          pickupAct && pickupAct.length > 0
-            ? pickupAct[pickupAct.length - 1]
-            : idleFrames[0];
-        this.sampleSequence(
-          [holdStance, holdStance, idleFrames[0]],
-          params.phase,
-          this.targetPose,
-        );
+        this.sampleSequence(this.throwSeq, params.phase, this.targetPose);
         break;
       }
 
       case 'play_sandbox': {
         this.activeClipLabel = 'ardy:pickup + crouch_idle';
-        if (pickupAct && pickupAct.length >= 2) {
+        if (this.sandboxSeq.length > 1) {
           const loopT = (params.timeSec * 0.45) % 1;
-          this.sampleSequence(
-            [crouchFrames[0], pickupAct[0], pickupAct[Math.min(3, pickupAct.length - 1)], crouchFrames[0]],
-            loopT,
-            this.targetPose,
-          );
+          this.sampleSequence(this.sandboxSeq, loopT, this.targetPose);
         } else {
           this.targetPose.set(crouchFrames[0]);
         }
@@ -696,8 +759,7 @@ export class Soma77MotionSequencer {
 
       case 'stand_up': {
         this.activeClipLabel = 'ardy:stand_up';
-        const sitPose = sitPrim?.[1] || sitPrim?.[0] || crouchFrames[0];
-        this.sk.interpolatePoses(sitPose, idleFrames[0], params.phase, this.targetPose);
+        this.sk.interpolatePoses(this.sitPose, idleFrames[0], params.phase, this.targetPose);
         break;
       }
 
