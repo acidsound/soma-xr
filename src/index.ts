@@ -33,6 +33,7 @@ import { SpatialSanctuaryUI } from './ui/SpatialSanctuaryUI';
 import { SandboxHud } from './ui/SandboxHud';
 import {
   TtsLipSyncPlayer,
+  isStaticDemo,
   requestNpcResponse,
   requestNpcTts,
   transcribeAudioBlob,
@@ -778,6 +779,21 @@ class SomaPlaygroundSandbox extends xb.Script {
     text: string,
     npcEmotion: NpcEmotionType,
   ): Promise<void> {
+    if (isStaticDemo()) {
+      if (!('speechSynthesis' in window)) return;
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = 'ko-KR';
+      utterance.rate = 0.98;
+      utterance.pitch =
+        npcEmotion === 'sad' || npcEmotion === 'concerned'
+          ? 0.9
+          : npcEmotion === 'playful'
+            ? 1.15
+            : 1;
+      window.speechSynthesis.speak(utterance);
+      return;
+    }
     try {
       const tts = await requestNpcTts({
         text,

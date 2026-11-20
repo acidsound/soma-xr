@@ -5,7 +5,7 @@ import type {
   SomaMotionStyle,
 } from './types';
 
-export const DEFAULT_VRM_URL = '/assets/vrm/mech_girl.vrm';
+export const DEFAULT_VRM_URL = `${import.meta.env.BASE_URL}assets/vrm/mech_girl.vrm`;
 
 export const MOTIONBRICKS_R2_ONNX_URL =
   'https://pub-360a7e233de942c5bfcb52d8623e38f2.r2.dev/mmm_v6_soma_q8h.onnx';

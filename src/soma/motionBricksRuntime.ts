@@ -290,10 +290,11 @@ export interface MotionBricksDataset {
  * https://huggingface.co/spaces/monoradio/motionbricks-live/tree/main
  */
 export async function loadMotionBricksDatasets(): Promise<MotionBricksDataset> {
+  const base = import.meta.env.BASE_URL;
   const [somaRes, ardyRes, kimodoRes] = await Promise.all([
-    fetch('/runtime_data/soma_runtime.json'),
-    fetch('/runtime_data/ardy_runtime.json'),
-    fetch('/runtime_data/kimodo_runtime.json'),
+    fetch(`${base}runtime_data/soma_runtime.json`),
+    fetch(`${base}runtime_data/ardy_runtime.json`),
+    fetch(`${base}runtime_data/kimodo_runtime.json`),
   ]);
 
   if (!somaRes.ok) {

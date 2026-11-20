@@ -133,7 +133,7 @@ export class SomaOnnxEngine {
     return new Promise<SomaRuntimeStatus>((resolve, reject) => {
       try {
         this.mbWorker?.terminate();
-        this.mbWorker = new Worker('/workers/mb_worker.js');
+        this.mbWorker = new Worker(`${import.meta.env.BASE_URL}workers/mb_worker.js`);
         this.mbWorker.onmessage = (ev: MessageEvent) => {
           const m = ev.data as {
             type: string;
