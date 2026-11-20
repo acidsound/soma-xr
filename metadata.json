@@ -1,0 +1,11 @@
+{
+  "name": "SOMA·Heart XR Romance Sandbox",
+  "description": "MotionBricks SOMA ONNX & VRM 기반 실시간 감정 분석 · 시선 추적 · 음성 대화 XR 연애 시뮬레이션 샌드박스",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
