@@ -31,13 +31,7 @@ import { VrmAvatarController } from './avatar/VrmAvatarController';
 import { PlaygroundEnvironment } from './scene/PlaygroundEnvironment';
 import { SpatialSanctuaryUI } from './ui/SpatialSanctuaryUI';
 import { SandboxHud } from './ui/SandboxHud';
-import {
-  TtsLipSyncPlayer,
-  isStaticDemo,
-  requestNpcResponse,
-  requestNpcTts,
-  transcribeAudioBlob,
-} from './services/apiClient';
+import { TtsLipSyncPlayer, requestNpcResponse } from './services/apiClient';
 import { WebcamGazeTracker } from './vision/WebcamGazeTracker';
 
 function detectSoftwareWebGL(): boolean {
@@ -779,34 +773,18 @@ class SomaPlaygroundSandbox extends xb.Script {
     text: string,
     npcEmotion: NpcEmotionType,
   ): Promise<void> {
-    if (isStaticDemo()) {
-      if (!('speechSynthesis' in window)) return;
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = 'ko-KR';
-      utterance.rate = 0.98;
-      utterance.pitch =
-        npcEmotion === 'sad' || npcEmotion === 'concerned'
-          ? 0.9
-          : npcEmotion === 'playful'
-            ? 1.15
-            : 1;
-      window.speechSynthesis.speak(utterance);
-      return;
-    }
-    try {
-      const tts = await requestNpcTts({
-        text,
-        npcEmotion,
-        voiceName: this.activePersona.voiceName,
-      });
-      await this.ttsPlayer.playBase64Wav(tts.audioBase64);
-    } catch (err) {
-      console.warn('[TTS] Playback error:', err);
-      this.hud.setError(
-        err instanceof Error ? err.message : '음성(TTS) 출력에 실패했습니다.',
-      );
-    }
+    if (!('speechSynthesis' in window)) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = 'ko-KR';
+    utterance.rate = 0.98;
+    utterance.pitch =
+      npcEmotion === 'sad' || npcEmotion === 'concerned'
+        ? 0.9
+        : npcEmotion === 'playful'
+          ? 1.15
+          : 1;
+    window.speechSynthesis.speak(utterance);
   }
 
   private async toggleVoiceRecording(): Promise<void> {
@@ -839,24 +817,15 @@ class SomaPlaygroundSandbox extends xb.Script {
         if (blob.size < 256 && !this.interimTranscript.trim()) {
           return;
         }
-        try {
-          this.hud.setBusy(true);
-          const transcribed = await transcribeAudioBlob(blob);
-          const finalText = transcribed.trim() || this.interimTranscript.trim();
-          if (finalText) {
-            await this.sendUserMessage(finalText, 'voice_chat');
-          }
-        } catch (err) {
-          if (this.interimTranscript.trim()) {
-            await this.sendUserMessage(this.interimTranscript.trim(), 'voice_chat');
-          } else {
-            this.hud.setError(
-              err instanceof Error ? err.message : '음성 인식에 실패했습니다.',
-            );
-          }
-        } finally {
-          this.hud.setBusy(false);
+        const finalText = this.interimTranscript.trim();
+        if (finalText) {
+          await this.sendUserMessage(finalText, 'voice_chat');
+        } else {
+          this.hud.setError(
+            '음성 인식 결과가 없습니다. 브라우저 음성 인식 권한을 확인해 주세요.',
+          );
         }
+        this.hud.setBusy(false);
       };
 
       const SpeechRec =

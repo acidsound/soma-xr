@@ -1,264 +1,259 @@
-import type {
-  ChatTurn,
-  GazeMode,
-  NpcEmotionType,
-  NpcRespondPayload,
-  PersonaProfile,
-  RelationshipState,
-  UserEmotionAnalysis,
-  UserEmotionType,
-} from '../types';
-import { defaultSomaStyleForEmotion } from '../sim/romanceEngine';
-import { DEFAULT_QUICK_CHOICES } from '../constants';
+import {
+  buildStaticResponse,
+  type NpcRequestParams,
+} from './staticNpcResponder';
+import {
+  loadLocalApiConfig,
+  type LocalApiConfig,
+} from './localApiConfig';
+import type { NpcRespondPayload, PersonaProfile } from '../types';
 
-const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '');
+const VALID_USER_EMOTIONS = new Set([
+  'joy',
+  'affection',
+  'curiosity',
+  'shy',
+  'sad',
+  'anxious',
+  'frustrated',
+  'playful',
+  'neutral',
+]);
+const VALID_NPC_EMOTIONS = new Set([
+  'happy',
+  'blush',
+  'loving',
+  'shy',
+  'surprised',
+  'sad',
+  'concerned',
+  'playful',
+  'calm',
+]);
+const VALID_MOTIONS = new Set([
+  'idle_gentle',
+  'wave_greet',
+  'lean_affection',
+  'shy_fidget',
+  'happy_bounce',
+  'nod_listen',
+  'comfort_reach',
+  'head_tilt_curious',
+  'cheer_clap',
+  'point_forward',
+]);
+const VALID_GAZES = new Set(['lock_eyes', 'shy_avert', 'curious_tilt']);
+const VALID_PLAYGROUND_COMMANDS = new Set([
+  'none',
+  'move_to',
+  'sit_bench',
+  'vault_bench',
+  'sit_seesaw',
+  'vault_seesaw',
+  'ride_slide',
+  'ride_swing',
+  'vault_box_1',
+  'vault_box_2',
+  'vault_box_3',
+  'vault_boxes_all',
+  'kick_soccer',
+  'throw_basketball',
+  'play_sandbox',
+  'stand_up',
+]);
 
-export interface HealthStatus {
-  ok: boolean;
-  hasGeminiKey: boolean;
-}
-
-/** GitHub Pages has no server: route chat to a local demo responder. */
+/**
+ * GitHub Pages has no server: requestNpcResponse falls back to a local
+ * rule-based responder unless the user configured an OpenAI-compatible API.
+ */
 export function isStaticDemo(): boolean {
-  return __STATIC_DEMO__ && !API_BASE;
+  return __STATIC_DEMO__;
 }
 
-function apiUrl(path: string): string {
-  return `${API_BASE}${path}`;
+function openAiChatUrl(endpoint: string): string {
+  return /\/chat\/completions\/?$/.test(endpoint)
+    ? endpoint
+    : `${endpoint}/chat/completions`;
 }
 
-interface StaticReplyPreset {
-  npcEmotion: NpcEmotionType;
-  gazeMode: GazeMode;
-  reply: string;
-  innerThought: string;
-  affectionDelta: number;
-  trustDelta: number;
-  moodDelta: number;
+function buildSystemPrompt(persona: Partial<PersonaProfile>, body: NpcRequestParams): string {
+  const rel = body.relationship || {};
+  return [
+    `당신은 XR 놀이터 연애 시뮬레이션 샌드박스의 3D VRM 동반자 "${persona.name || '서연'}" (${persona.role || '놀이터 산책 메이트'})입니다.`,
+    `현재 공간은 미끄럼틀, 그네, 시소, 벤치, 1~3단 뜀틀, 축구공, 농구공, 모래놀이터가 있는 노을 공원 놀이터입니다.`,
+    `성격: ${persona.personality || '따뜻하고 활발하며 사용자의 말과 감정에 진심으로 귀 기울이는 성격'}`,
+    `말투: ${persona.speakingStyle || '부드럽고 다정한 해요체, 친밀도가 높아질수록 애정이 담긴 친근한 표현 사용'}`,
+    `현재 관계 상태: 단계=${rel.stage || '낯선 만남'}, 호감도=${rel.affection ?? 32}/100, 신뢰도=${rel.trust ?? 28}/100, 기분=${rel.mood ?? 72}/100, 대화 턴=${rel.turnCount ?? 0}.`,
+    `역할:\n1. 사용자의 발화에서 감정(userEmotion)을 분석하세요.`,
+    `2. NPC 감정(npcEmotion), MotionBricks SOMA 모션 스타일(somaMotionStyle), 시선(gazeMode)을 선택하세요.`,
+    `3. 놀이터 행동을 요청하면 적절한 playgroundCommand를 설정하세요.`,
+    `4. 답변(npcReply)은 1~3문장의 자연스러운 한국어 구어체로 작성하고 이모지·괄호 지문은 넣지 마세요.`,
+    `출력은 반드시 JSON 객체 하나이며 아래 키를 모두 포함해야 합니다: userEmotion{primary,intensity,valence,arousal,labelKo,cues}, npcReply, npcEmotion, somaMotionStyle, gazeMode, affectionDelta, trustDelta, moodDelta, innerThought, suggestedChoices(2~3개), playgroundCommand.`,
+    `primary는 joy/affection/curiosity/shy/sad/anxious/frustrated/playful/neutral 중 하나,`,
+    `npcEmotion은 happy/blush/loving/shy/surprised/sad/concerned/playful/calm 중 하나,`,
+    `somaMotionStyle은 idle_gentle/wave_greet/lean_affection/shy_fidget/happy_bounce/nod_listen/comfort_reach/head_tilt_curious/cheer_clap/point_forward 중 하나,`,
+    `gazeMode는 lock_eyes/shy_avert/curious_tilt 중 하나여야 합니다.`,
+  ].join('\n');
 }
 
-const STATIC_REPLIES: Record<UserEmotionType, StaticReplyPreset> = {
-  affection: {
-    npcEmotion: 'loving',
-    gazeMode: 'lock_eyes',
-    reply: '그렇게 말해 주니 진짜 기뻐. 오늘 놀이터에서 네 곁에 있는 것만으로도 좋아.',
-    innerThought: '네가 나를 좋아해 줘서 마음이 따뜻해.',
-    affectionDelta: 5,
-    trustDelta: 3,
-    moodDelta: 8,
-  },
-  shy: {
-    npcEmotion: 'blush',
-    gazeMode: 'shy_avert',
-    reply: '나도 네 앞에서는 좀 부끄러워져... 손 잡아도 될까?',
-    innerThought: '가슴이 자꾸 두근거려.',
-    affectionDelta: 3,
-    trustDelta: 1,
-    moodDelta: 5,
-  },
-  joy: {
-    npcEmotion: 'happy',
-    gazeMode: 'lock_eyes',
-    reply: '으흐흐, 기분 좋아! 미끄럼틀 타러 같이 가자!',
-    innerThought: '네가 웃으니까 나도 웃음이 나.',
-    affectionDelta: 2,
-    trustDelta: 1,
-    moodDelta: 6,
-  },
-  playful: {
-    npcEmotion: 'playful',
-    gazeMode: 'curious_tilt',
-    reply: '장난 치나? 나도 진지하게 받아줄게~ 뭐부터 해볼래?',
-    innerThought: '네 장난기가 나도 모르게 따라오게 해.',
-    affectionDelta: 2,
-    trustDelta: 0,
-    moodDelta: 5,
-  },
-  sad: {
-    npcEmotion: 'concerned',
-    gazeMode: 'lock_eyes',
-    reply: '그랬구나... 벤치에 같이 앉아서 천천히 이야기하자. 내가 곁에 있을게.',
-    innerThought: '네 마음이 좀 무거워 보여. 곁에 있어 줄게.',
-    affectionDelta: 2,
-    trustDelta: 4,
-    moodDelta: 2,
-  },
-  anxious: {
-    npcEmotion: 'concerned',
-    gazeMode: 'lock_eyes',
-    reply: '천천히 숨 고르자. 내가 옆에서 같이 있을게, 하나씩 해보면 돼.',
-    innerThought: '조금이라도 마음이 편해졌으면 좋겠어.',
-    affectionDelta: 1,
-    trustDelta: 4,
-    moodDelta: 2,
-  },
-  frustrated: {
-    npcEmotion: 'sad',
-    gazeMode: 'lock_eyes',
-    reply: '그런 일이 있었구나. 네 마음 충분히 이해해. 같이 그네 타고 바람 쐬자.',
-    innerThought: '네가 답답해하는 마음을 헤아리고 싶어.',
-    affectionDelta: 1,
-    trustDelta: 3,
-    moodDelta: 1,
-  },
-  curiosity: {
-    npcEmotion: 'surprised',
-    gazeMode: 'curious_tilt',
-    reply: '좋은 질문이야! 같이 찾아보자. 궁금한 게 더 있으면 말해 줘.',
-    innerThought: '네 호기심이 나도 신나게 해.',
-    affectionDelta: 1,
-    trustDelta: 2,
-    moodDelta: 4,
-  },
-  neutral: {
-    npcEmotion: 'happy',
-    gazeMode: 'lock_eyes',
-    reply: '그래, 오늘 놀이터에서 뭐부터 해볼까?',
-    innerThought: '네와 함께할 시간이 기다려져.',
-    affectionDelta: 1,
-    trustDelta: 1,
-    moodDelta: 2,
-  },
-};
-
-interface NpcRequestParams {
-  message: string;
-  interactionType: string;
-  localEmotionHint: UserEmotionAnalysis;
-  relationship: RelationshipState;
-  persona: PersonaProfile;
-  history: ChatTurn[];
+function buildUserPrompt(body: NpcRequestParams): string {
+  const history = Array.isArray(body.history) ? body.history.slice(-10) : [];
+  const conversation = history
+    .map((item) => `${item.role === 'user' ? '사용자' : 'NPC'}: ${item.text}`)
+    .join('\n');
+  return [
+    conversation ? `[최근 대화]\n${conversation}` : '',
+    `[실시간 로컬 감정 힌트] ${JSON.stringify(body.localEmotionHint || {})}`,
+    `[상호작용 유형] ${body.interactionType || 'text_chat'}`,
+    `[이번 사용자 입력] ${body.message}`,
+  ]
+    .filter(Boolean)
+    .join('\n\n');
 }
 
-function buildStaticResponse(params: NpcRequestParams): NpcRespondPayload {
-  const userEmotion = params.localEmotionHint;
-  const preset = STATIC_REPLIES[userEmotion.primary] ?? STATIC_REPLIES.neutral;
+function extractJsonObject(content: string): Record<string, unknown> | null {
+  const fenced = content.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = (fenced ? fenced[1] : content).trim();
+  const start = candidate.indexOf('{');
+  const end = candidate.lastIndexOf('}');
+  if (start < 0 || end <= start) return null;
+  try {
+    const parsed: unknown = JSON.parse(candidate.slice(start, end + 1));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Keep response fields type-safe even if the model ignores the schema. */
+function coerceResponse(raw: Record<string, unknown> | null, params: NpcRequestParams): NpcRespondPayload {
+  const fallback = buildStaticResponse(params);
+  if (!raw) return fallback;
+
+  const rawEmotion = raw.userEmotion && typeof raw.userEmotion === 'object'
+    ? (raw.userEmotion as Record<string, unknown>)
+    : {};
+  const emotionPrimary = VALID_USER_EMOTIONS.has(String(rawEmotion.primary))
+    ? (rawEmotion.primary as NpcRespondPayload['userEmotion']['primary'])
+    : fallback.userEmotion.primary;
+  const numberOr = (value: unknown, base: number): number =>
+    typeof value === 'number' && Number.isFinite(value) ? value : base;
+
+  const npcEmotion = VALID_NPC_EMOTIONS.has(String(raw.npcEmotion))
+    ? (raw.npcEmotion as NpcRespondPayload['npcEmotion'])
+    : fallback.npcEmotion;
+  const somaMotionStyle = VALID_MOTIONS.has(String(raw.somaMotionStyle))
+    ? (raw.somaMotionStyle as NpcRespondPayload['somaMotionStyle'])
+    : fallback.somaMotionStyle;
+  const gazeMode = VALID_GAZES.has(String(raw.gazeMode))
+    ? (raw.gazeMode as NpcRespondPayload['gazeMode'])
+    : fallback.gazeMode;
+  const playgroundCommand = VALID_PLAYGROUND_COMMANDS.has(String(raw.playgroundCommand))
+    ? (raw.playgroundCommand as NpcRespondPayload['playgroundCommand'])
+    : undefined;
+  const choices = Array.isArray(raw.suggestedChoices)
+    ? raw.suggestedChoices.filter((item): item is string => typeof item === 'string' && !!item.trim()).slice(0, 3)
+    : [];
+
   return {
-    userEmotion,
-    npcReply: preset.reply,
-    npcEmotion: preset.npcEmotion,
-    somaMotionStyle: defaultSomaStyleForEmotion(preset.npcEmotion),
-    gazeMode: preset.gazeMode,
-    affectionDelta: preset.affectionDelta,
-    trustDelta: preset.trustDelta,
-    moodDelta: preset.moodDelta,
-    innerThought: `${params.persona.name}: ${preset.innerThought} (정적 데모 응답)`,
-    suggestedChoices: [...DEFAULT_QUICK_CHOICES],
-  };
-}
-
-export async function checkApiHealth(): Promise<HealthStatus> {
-  if (isStaticDemo()) {
-    return { ok: true, hasGeminiKey: false };
-  }
-  const res = await fetch(apiUrl('/api/health'));
-  if (!res.ok) {
-    throw new Error(`Health check failed (${res.status})`);
-  }
-  return (await res.json()) as HealthStatus;
-}
-
-export async function requestNpcResponse(params: NpcRequestParams): Promise<NpcRespondPayload> {
-  if (isStaticDemo()) {
-    return buildStaticResponse(params);
-  }
-  const res = await fetch(apiUrl('/api/npc/respond'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      message: params.message,
-      interactionType: params.interactionType,
-      localEmotionHint: {
-        primary: params.localEmotionHint.primary,
-        valence: params.localEmotionHint.valence,
-        arousal: params.localEmotionHint.arousal,
-      },
-      relationship: {
-        affection: params.relationship.affection,
-        trust: params.relationship.trust,
-        mood: params.relationship.mood,
-        stage: params.relationship.stage,
-        turnCount: params.relationship.turnCount,
-      },
-      persona: {
-        id: params.persona.id,
-        name: params.persona.name,
-        role: params.persona.role,
-        personality: params.persona.personality,
-        speakingStyle: params.persona.speakingStyle,
-      },
-      history: params.history.slice(-10).map((t) => ({
-        role: t.role,
-        text: t.text,
-      })),
-    }),
-  });
-
-  const data = (await res.json()) as NpcRespondPayload & { error?: string };
-  if (!res.ok) {
-    throw new Error(data.error || `LLM 요청 실패 (${res.status})`);
-  }
-  return data;
-}
-
-export async function transcribeAudioBlob(blob: Blob): Promise<string> {
-  if (isStaticDemo()) {
-    throw new Error(
-      '정적 데모에서는 브라우저 음성 인식만 지원합니다. Chrome에서 마이크를 사용해 주세요.',
-    );
-  }
-  const buffer = await blob.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-  }
-  const audioBase64 = btoa(binary);
-  const mimeType = blob.type || 'audio/webm';
-
-  const res = await fetch(apiUrl('/api/speech/transcribe'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ audioBase64, mimeType }),
-  });
-
-  const data = (await res.json()) as { text?: string; error?: string };
-  if (!res.ok) {
-    throw new Error(data.error || `음성 변환 실패 (${res.status})`);
-  }
-  return data.text || '';
-}
-
-export async function requestNpcTts(params: {
-  text: string;
-  npcEmotion: NpcEmotionType;
-  voiceName: string;
-}): Promise<{ audioBase64: string; mimeType: string }> {
-  const res = await fetch(apiUrl('/api/speech/tts'), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  });
-
-  const data = (await res.json()) as {
-    audioBase64?: string;
-    mimeType?: string;
-    error?: string;
-  };
-  if (!res.ok || !data.audioBase64) {
-    throw new Error(data.error || `TTS 생성 실패 (${res.status})`);
-  }
-  return {
-    audioBase64: data.audioBase64,
-    mimeType: data.mimeType || 'audio/wav',
+    userEmotion: {
+      primary: emotionPrimary,
+      intensity: Math.min(1, Math.max(0, numberOr(rawEmotion.intensity, fallback.userEmotion.intensity))),
+      valence: Math.min(1, Math.max(-1, numberOr(rawEmotion.valence, fallback.userEmotion.valence))),
+      arousal: Math.min(1, Math.max(0, numberOr(rawEmotion.arousal, fallback.userEmotion.arousal))),
+      labelKo: typeof rawEmotion.labelKo === 'string' && rawEmotion.labelKo.trim()
+        ? rawEmotion.labelKo.trim()
+        : fallback.userEmotion.labelKo,
+      cues: typeof rawEmotion.cues === 'string' && rawEmotion.cues.trim()
+        ? rawEmotion.cues.trim()
+        : fallback.userEmotion.cues,
+    },
+    npcReply: typeof raw.npcReply === 'string' && raw.npcReply.trim()
+      ? raw.npcReply.trim()
+      : fallback.npcReply,
+    npcEmotion,
+    somaMotionStyle,
+    gazeMode,
+    affectionDelta: Math.round(numberOr(raw.affectionDelta, fallback.affectionDelta)),
+    trustDelta: Math.round(numberOr(raw.trustDelta, fallback.trustDelta)),
+    moodDelta: Math.round(numberOr(raw.moodDelta, fallback.moodDelta)),
+    innerThought: typeof raw.innerThought === 'string' && raw.innerThought.trim()
+      ? raw.innerThought.trim()
+      : fallback.innerThought,
+    suggestedChoices: choices.length ? choices : fallback.suggestedChoices,
+    playgroundCommand,
   };
 }
 
 /**
- * Plays WAV TTS output through Web Audio API and exposes real-time RMS
- * speaking amplitude (0..1) for VRM mouth lip-sync.
+ * Calls the configured OpenAI-compatible `/chat/completions` endpoint directly
+ * from the browser. The key never passes through this app's server.
  */
+async function requestOpenAiResponse(
+  params: NpcRequestParams,
+  config: LocalApiConfig,
+): Promise<NpcRespondPayload> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60_000);
+  let response: Response;
+  try {
+    response = await fetch(openAiChatUrl(config.endpoint), {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: config.model,
+        messages: [
+          { role: 'system', content: buildSystemPrompt(params.persona || {}, params) },
+          { role: 'user', content: buildUserPrompt(params) },
+        ],
+        temperature: 0.8,
+      }),
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`OpenAI 호환 API 오류 (${response.status}): ${text.slice(0, 300) || response.statusText}`);
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    throw new Error('OpenAI 호환 API가 JSON을 반환하지 않았습니다.');
+  }
+  const choices = (payload as { choices?: Array<{ message?: { content?: string } }> })?.choices;
+  const content = choices?.[0]?.message?.content;
+  if (typeof content !== 'string' || !content.trim()) {
+    throw new Error('OpenAI 호환 API 응답에 choices[0].message.content가 없습니다.');
+  }
+  return coerceResponse(extractJsonObject(content), params);
+}
+
+export async function requestNpcResponse(params: NpcRequestParams): Promise<NpcRespondPayload> {
+  const config = loadLocalApiConfig();
+  if (config) {
+    return requestOpenAiResponse(params, config);
+  }
+  return buildStaticResponse(params);
+}
+
+/**
+ * Local-only build: audio is never uploaded. The app uses browser Web Speech
+ * interim results when available; recording a blob alone cannot be transcribed.
+ */
+export async function transcribeAudioBlob(_blob: Blob): Promise<string> {
+  void _blob;
+  throw new Error('음성 인식은 브라우저(Web Speech API) 결과만 사용합니다.');
+}
 export class TtsLipSyncPlayer {
   private audioCtx: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;

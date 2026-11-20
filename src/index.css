@@ -681,6 +681,42 @@ label:focus-visible {
   margin-top: 6px;
 }
 
+.sh-settings-card {
+  max-width: 480px;
+  text-align: left;
+}
+
+.sh-settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.sh-settings-field input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px 11px;
+  border-radius: 9px;
+  border: 1px solid var(--border-subtle);
+  background: rgba(10, 7, 18, 0.65);
+  color: var(--text-main);
+  font: inherit;
+}
+
+.sh-settings-field input:focus {
+  outline: none;
+  border-color: var(--accent-rose);
+}
+
+.sh-settings-status {
+  min-height: 1.2em;
+  margin: 2px 0 0;
+  font-size: 0.78rem;
+  color: var(--accent-rose);
+}
+
 @media (max-width: 640px) {
   .sh-title-overlay {
     align-items: flex-end;

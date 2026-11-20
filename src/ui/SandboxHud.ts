@@ -13,6 +13,11 @@ import {
   PLAYGROUND_QUICK_COMMANDS,
   SOMA_STYLE_LABELS,
 } from '../constants';
+import {
+  clearLocalApiConfig,
+  loadLocalApiConfig,
+  saveLocalApiConfig,
+} from '../services/localApiConfig';
 
 export interface HudCallbacks {
   onStartGame: () => void;
@@ -49,6 +54,12 @@ export class SandboxHud {
   private titleOverlay!: HTMLElement;
   private playingHud!: HTMLElement;
   private pauseModal!: HTMLElement;
+  private settingsModal!: HTMLElement;
+
+  private apiEndpointInput!: HTMLInputElement;
+  private apiModelInput!: HTMLInputElement;
+  private apiKeyInput!: HTMLInputElement;
+  private apiSettingsStatusEl!: HTMLElement;
 
   // Dynamic elements
   private personaBadgeEl!: HTMLElement;
@@ -225,6 +236,11 @@ export class SandboxHud {
     const xrBtn = this.createUtilButton('XR 모드', 'enter-xr-btn', () =>
       this.callbacks.onEnterXR(),
     );
+    const apiSettingsBtn = this.createUtilButton(
+      'API 설정',
+      'api-settings-btn',
+      () => this.openApiSettings(),
+    );
     const pauseBtn = this.createUtilButton('메뉴 [P]', 'pause-btn', () =>
       this.callbacks.onPauseToggle(),
     );
@@ -234,6 +250,7 @@ export class SandboxHud {
       this.gazeBtnEl,
       this.spatialCardBtnEl,
       xrBtn,
+      apiSettingsBtn,
       pauseBtn,
     );
 
@@ -354,7 +371,84 @@ export class SandboxHud {
       ?.addEventListener('click', () => this.callbacks.onReturnTitle());
 
     this.root.appendChild(this.pauseModal);
+
+    // 4. LOCAL OPENAI-COMPATIBLE API SETTINGS MODAL
+    this.settingsModal = document.createElement('div');
+    this.settingsModal.className = 'sh-modal-backdrop';
+    this.settingsModal.hidden = true;
+    this.settingsModal.innerHTML = `
+      <div class="sh-modal-card sh-settings-card" role="dialog" aria-modal="true" aria-label="API 설정">
+        <h2 class="sh-modal-title">OpenAI 호환 API 설정</h2>
+        <p class="sh-modal-desc">
+          Endpoint · Model · API 키는 이 브라우저(localStorage)에만 저장되며 앱 서버로 전송되지 않습니다.
+        </p>
+        <label class="sh-settings-field">
+          <span>API Endpoint</span>
+          <input type="text" data-action="endpoint" placeholder="http://localhost:11434/v1" autocomplete="off" spellcheck="false" />
+        </label>
+        <label class="sh-settings-field">
+          <span>Model</span>
+          <input type="text" data-action="model" placeholder="예: gpt-4o-mini 또는 llama3" autocomplete="off" spellcheck="false" />
+        </label>
+        <label class="sh-settings-field">
+          <span>API Key</span>
+          <input type="password" data-action="api-key" placeholder="로컬에서만 사용할 키" autocomplete="off" spellcheck="false" />
+        </label>
+        <p class="sh-settings-status" data-action="status" role="status"></p>
+        <div class="sh-modal-actions">
+          <button type="button" class="sh-primary-cta" data-action="save">브라우저에 저장</button>
+          <button type="button" class="sh-secondary-cta" data-action="clear">설정 삭제</button>
+          <button type="button" class="sh-secondary-cta" data-action="close">닫기</button>
+        </div>
+      </div>
+    `;
+    this.apiEndpointInput = this.settingsModal.querySelector('[data-action="endpoint"]')!;
+    this.apiModelInput = this.settingsModal.querySelector('[data-action="model"]')!;
+    this.apiKeyInput = this.settingsModal.querySelector('[data-action="api-key"]')!;
+    this.apiSettingsStatusEl = this.settingsModal.querySelector('[data-action="status"]')!;
+    this.settingsModal
+      .querySelector('[data-action="save"]')
+      ?.addEventListener('click', () => {
+        const endpoint = this.apiEndpointInput.value.trim();
+        const model = this.apiModelInput.value.trim();
+        const apiKey = this.apiKeyInput.value.trim();
+        if (!endpoint || !model || !apiKey) {
+          this.apiSettingsStatusEl.textContent =
+            'Endpoint, Model, API 키를 모두 입력해 주세요.';
+          return;
+        }
+        saveLocalApiConfig({ endpoint, model, apiKey });
+        this.apiSettingsStatusEl.textContent =
+          '이 브라우저에 저장했습니다. 서버로 전송되지 않습니다.';
+      });
+    this.settingsModal
+      .querySelector('[data-action="clear"]')
+      ?.addEventListener('click', () => {
+        clearLocalApiConfig();
+        this.apiEndpointInput.value = '';
+        this.apiModelInput.value = '';
+        this.apiKeyInput.value = '';
+        this.apiSettingsStatusEl.textContent = '저장된 설정을 삭제했습니다.';
+      });
+    this.settingsModal
+      .querySelector('[data-action="close"]')
+      ?.addEventListener('click', () => {
+        this.settingsModal.hidden = true;
+      });
+    this.root.appendChild(this.settingsModal);
+
     this.switchTab('chat');
+  }
+
+  private openApiSettings(): void {
+    const config = loadLocalApiConfig();
+    this.apiEndpointInput.value = config?.endpoint ?? '';
+    this.apiModelInput.value = config?.model ?? '';
+    this.apiKeyInput.value = config?.apiKey ?? '';
+    this.apiSettingsStatusEl.textContent = config
+      ? '저장된 로컬 설정을 불러왔습니다.'
+      : '설정이 없습니다. 저장하면 이 브라우저에서 바로 사용합니다.';
+    this.settingsModal.hidden = false;
   }
 
   private buildChatTab(): void {
