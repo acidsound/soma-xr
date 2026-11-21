@@ -53,9 +53,11 @@ export class WristRadialMenu {
 
   private readonly items: RadialMenuItem[];
   private readonly segmentMeshes: THREE.Mesh[] = [];
+  private readonly labelMeshes: THREE.Mesh[] = [];
   private readonly segmentMaterials: THREE.MeshBasicMaterial[] = [];
   private readonly baseColors: THREE.Color[] = [];
   private readonly labelTextures: THREE.Texture[] = [];
+  private readonly itemEnabled: boolean[];
   private readonly geometries: THREE.BufferGeometry[] = [];
   private readonly raycaster = new THREE.Raycaster();
 
@@ -65,6 +67,7 @@ export class WristRadialMenu {
 
   constructor(items: RadialMenuItem[]) {
     this.items = items;
+    this.itemEnabled = items.map(() => true);
     this.group.name = 'WristRadialMenu';
     this.group.visible = false;
     this.group.renderOrder = 20;
@@ -120,6 +123,7 @@ export class WristRadialMenu {
       // Labels must not block ray selection of their segment.
       label.raycast = () => {};
       this.group.add(label);
+      this.labelMeshes.push(label);
 
       this.segmentMeshes.push(mesh);
       this.segmentMaterials.push(material);
@@ -211,6 +215,7 @@ export class WristRadialMenu {
   public activate(index: number): boolean {
     const item = this.items[index];
     if (!item) return false;
+    if (!this.itemEnabled[index]) return false;
     this.closeMenu();
     item.onSelect();
     return true;
@@ -223,7 +228,8 @@ export class WristRadialMenu {
       this.raycaster.set(ray.origin, ray.direction);
       const hits = this.raycaster.intersectObjects(this.segmentMeshes, false);
       if (hits.length > 0) {
-        index = this.itemIndexFromObject(hits[0].object);
+        const resolved = this.itemIndexFromObject(hits[0].object);
+        index = resolved >= 0 && this.itemEnabled[resolved] ? resolved : -1;
       }
     }
     this.setHover(index);
@@ -274,19 +280,40 @@ export class WristRadialMenu {
     this.group.updateMatrixWorld(true);
   }
 
+  /** Enable or disable a menu item (e.g. teleport in AR mode). Disabled items are dimmed and unhittable. */
+  public setItemEnabled(index: number, enabled: boolean): void {
+    if (index < 0 || index >= this.itemEnabled.length) return;
+    if (this.itemEnabled[index] === enabled) return;
+    this.itemEnabled[index] = enabled;
+    if (!enabled && this.hoveredIndex === index) this.hoveredIndex = -1;
+    this.applyItemStyles();
+  }
+
   private setHover(index: number): void {
     if (this.hoveredIndex === index) return;
     this.hoveredIndex = index;
+    this.applyItemStyles();
+  }
+
+  private applyItemStyles(): void {
     for (let i = 0; i < this.segmentMaterials.length; i++) {
       const material = this.segmentMaterials[i];
+      const label = this.labelMeshes[i];
+      if (!this.itemEnabled[i]) {
+        material.color.copy(this.baseColors[i]).multiplyScalar(0.35);
+        material.opacity = 0.18;
+        if (label) label.visible = false;
+        continue;
+      }
       material.color.copy(this.baseColors[i]);
-      if (i === index) {
+      if (i === this.hoveredIndex) {
         _tmpColor.set('#ffffff');
         material.color.lerp(_tmpColor, 0.5);
         material.opacity = 1;
       } else {
         material.opacity = 0.86;
       }
+      if (label) label.visible = true;
     }
   }
 

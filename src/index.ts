@@ -202,6 +202,7 @@ class SomaPlaygroundSandbox extends xb.Script {
     this.xrBridge = new XrInteractionBridge({
       isPlaying: () => this.appState === 'playing',
       isXrActive: () => this.isXrActive(),
+      isMovementAllowed: () => this.isMovementAllowed(),
       onSummonUI: () => this.summonSpatialUI(),
       onPlaygroundAction: (cmd) => this.triggerPlaygroundCommand(cmd),
       onPlaygroundObject: (id) => this.handlePlaygroundObjectInteraction(id, false),
@@ -285,6 +286,7 @@ class SomaPlaygroundSandbox extends xb.Script {
         presenting: !!xb.core.renderer?.xr?.isPresenting,
         xrSupported: xb.core.webXRSessionManager?.isXRSupported() ?? null,
         sessionMode: selectedXrMode,
+        movementAllowed: this.isMovementAllowed(),
         secureContext: window.isSecureContext,
         navigatorXr: isWebXrAvailable(),
         xrModeEngaged: this.xrModeEngaged,
@@ -754,12 +756,26 @@ class SomaPlaygroundSandbox extends xb.Script {
     return this.xrModeEngaged || !!xb.core.renderer?.xr?.isPresenting;
   }
 
+  /**
+   * Movement is natural in VR but awkward in AR, so player movement is
+   * disabled in AR sessions. The runtime blend mode is authoritative for a
+   * live session; the configured mode is the fallback for the simulator and
+   * the pre-session screen (the simulator does not set environmentBlendMode).
+   */
+  private isMovementAllowed(): boolean {
+    if (xb.core.environmentBlendMode === 'alpha-blend') return false;
+    return selectedXrMode !== 'immersive-ar';
+  }
+
   private getXrLaunchState(): { label: string; hint: string } {
     const manager = xb.core.webXRSessionManager;
+    const movementDisabled = !this.isMovementAllowed();
     if (manager?.currentSession) {
       return {
         label: 'Exit XR',
-        hint: '왼스틱 이동 · 오른스틱 좌우 스냅턴 · 뒤로 당겨 텔레포트',
+        hint: movementDisabled
+          ? 'AR 모드 – 플레이어 이동 비활성화'
+          : '왼스틱 이동 · 오른스틱 좌우 스냅턴 · 뒤로 당겨 텔레포트',
       };
     }
     if (!window.isSecureContext) {
@@ -771,18 +787,22 @@ class SomaPlaygroundSandbox extends xb.Script {
     if (!isWebXrAvailable()) {
       return {
         label: 'XR 시뮬레이터',
-        hint: '이 브라우저에는 WebXR API가 없습니다',
+        hint: movementDisabled
+          ? '이 브라우저에는 WebXR API가 없습니다 · AR – 이동 비활성화'
+          : '이 브라우저에는 WebXR API가 없습니다',
       };
     }
     if (manager?.isXRSupported() !== true) {
       return {
         label: 'XR 시뮬레이터',
-        hint: '헤드셋 미연결 – 시뮬레이터로 미리보기',
+        hint: movementDisabled
+          ? '헤드셋 미연결 – 시뮬레이터로 미리보기 · AR – 이동 비활성화'
+          : '헤드셋 미연결 – 시뮬레이터로 미리보기',
       };
     }
     return {
       label: `Enter XR (${selectedXrMode === 'immersive-ar' ? 'AR' : 'VR'})`,
-      hint: 'WebXR 세션 시작',
+      hint: movementDisabled ? 'AR – 플레이어 이동 비활성화' : 'WebXR 세션 시작',
     };
   }
 

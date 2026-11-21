@@ -4,11 +4,13 @@ import type { PlaygroundCommandType, PlaygroundObjectId } from '../types';
 import { PLAYGROUND_LAYOUT } from '../sim/playgroundSim';
 import { XrLocomotion } from './XrLocomotion';
 import { XrStickLocomotion, type StickAxes } from './XrStickLocomotion';
-import { WristRadialMenu, type MenuHand } from './WristRadialMenu';
+import { WristRadialMenu, type MenuHand, type RadialMenuItem } from './WristRadialMenu';
 
 export interface XrInteractionCallbacks {
   isPlaying: () => boolean;
   isXrActive: () => boolean;
+  /** True while player movement is allowed (false in AR mode). */
+  isMovementAllowed: () => boolean;
   onSummonUI: () => void;
   onPlaygroundAction: (cmd: PlaygroundCommandType) => void;
   onPlaygroundObject: (id: PlaygroundObjectId) => void;
@@ -39,6 +41,8 @@ export class XrInteractionBridge extends xb.Script {
   private debugAims = 0;
   private debugCommits = 0;
   private teleportArmed = false;
+  private readonly teleportMenuItemIndex: number;
+  private lastMovementAllowed: boolean | null = null;
 
   private readonly onGestureStart = (event: xb.GestureEvent): void => {
     if (event.detail.name !== 'fist') return;
@@ -52,7 +56,7 @@ export class XrInteractionBridge extends xb.Script {
     this.name = 'XrInteractionBridge';
     this.callbacks = callbacks;
 
-    this.menu = new WristRadialMenu([
+    const menuItems: RadialMenuItem[] = [
       {
         id: 'summon',
         label: '카드 소환',
@@ -82,6 +86,7 @@ export class XrInteractionBridge extends xb.Script {
         label: '내 이동',
         color: 0x14b8a6,
         onSelect: () => {
+          if (!this.callbacks.isMovementAllowed()) return;
           this.teleportArmed = !this.teleportArmed;
           if (!this.teleportArmed) this.locomotion.cancelAim();
         },
@@ -98,7 +103,9 @@ export class XrInteractionBridge extends xb.Script {
         color: 0x475569,
         onSelect: () => this.menu.closeMenu(),
       },
-    ]);
+    ];
+    this.teleportMenuItemIndex = menuItems.findIndex((item) => item.id === 'teleport');
+    this.menu = new WristRadialMenu(menuItems);
     this.add(this.menu.group);
 
     this.locomotion = new XrLocomotion({
@@ -122,6 +129,7 @@ export class XrInteractionBridge extends xb.Script {
       },
       raycastGround: (ray, out) => this.raycastGround(ray, out),
       isActive: () => this.callbacks.isPlaying() && this.callbacks.isXrActive(),
+      movementAllowed: () => this.callbacks.isMovementAllowed(),
       isBlocked: () => this.menu.isOpen,
     });
   }
@@ -157,6 +165,7 @@ export class XrInteractionBridge extends xb.Script {
 
   /** Debug/QA hook: teleport the user to a world-space floor point. */
   public teleportToPoint(x: number, z: number): void {
+    if (!this.movementAllowed) return;
     this.locomotion.beginAim(new THREE.Vector3(x, 0, z));
     this.locomotion.commitAim();
   }
@@ -191,12 +200,14 @@ export class XrInteractionBridge extends xb.Script {
     this.refreshInteractionTargets();
     this.locomotion.onXrSessionStarted();
     this.menu.closeMenu();
+    this.refreshMovementGate();
     this.reportDebug('session-start');
   }
 
   onXRSessionEnded(): void {
     this.locomotion.onXrSessionEnded();
     this.menu.closeMenu();
+    this.refreshMovementGate();
   }
 
   onKeyDown(event: xb.KeyEvent): void {
@@ -232,7 +243,7 @@ export class XrInteractionBridge extends xb.Script {
     }
 
     if (this.findGroundPoint(event)) {
-      if (this.teleportArmed) {
+      if (this.teleportArmed && this.movementAllowed) {
         this.debugAims++;
         this.locomotion.beginAim(_groundPoint);
       } else {
@@ -256,6 +267,10 @@ export class XrInteractionBridge extends xb.Script {
 
   onSelectEnd(): void {
     if (this.sticks.isTeleportAiming) return;
+    if (!this.movementAllowed) {
+      this.locomotion.cancelAim();
+      return;
+    }
     if (!this.locomotion.isAiming) return;
     this.debugCommits++;
     this.locomotion.commitAim();
@@ -268,6 +283,7 @@ export class XrInteractionBridge extends xb.Script {
   }
 
   update(): void {
+    this.refreshMovementGate();
     const elapsed = xb.core.elapsedTime || performance.now() * 0.001;
     this.locomotion.update(elapsed);
     this.sticks.update(xb.getDeltaTime() || 0.016);
@@ -298,6 +314,31 @@ export class XrInteractionBridge extends xb.Script {
     this.menu.dispose();
     this.locomotion.dispose();
     super.dispose();
+  }
+
+  private get movementAllowed(): boolean {
+    return this.callbacks.isMovementAllowed();
+  }
+
+  /**
+   * Apply the movement gate: dim the teleport menu item and cancel any
+   * in-flight player movement when AR mode is active. No-op when the gate is
+   * unchanged. Runs every frame so a session switch is picked up even if the
+   * lifecycle hooks are missed.
+   */
+  private refreshMovementGate(): void {
+    const allowed = this.movementAllowed;
+    if (this.lastMovementAllowed === allowed) return;
+    const wasAllowed = this.lastMovementAllowed;
+    this.lastMovementAllowed = allowed;
+    if (this.teleportMenuItemIndex >= 0) {
+      this.menu.setItemEnabled(this.teleportMenuItemIndex, allowed);
+    }
+    if (allowed) return;
+    if (wasAllowed !== null) {
+      if (this.teleportArmed) this.teleportArmed = false;
+      if (this.locomotion.isAiming) this.locomotion.cancelAim();
+    }
   }
 
   private handednessOf(controller: xb.Controller): MenuHand | null {
@@ -405,7 +446,7 @@ export class XrInteractionBridge extends xb.Script {
           return true;
         }
         if (node.userData?.playgroundGround) {
-          if (this.teleportArmed) {
+          if (this.teleportArmed && this.movementAllowed) {
             this.debugAims++;
             this.locomotion.beginAim(hit.point);
           } else {

@@ -47,6 +47,8 @@ export interface XrStickLocomotionOptions {
   raycastGround: (ray: THREE.Ray, out: THREE.Vector3) => boolean;
   /** True while the user may move at all (playing + XR/simulator engaged). */
   isActive: () => boolean;
+  /** True while player movement is allowed (false in AR mode). */
+  movementAllowed: () => boolean;
   /** True while something else owns input (wrist menu open). */
   isBlocked: () => boolean;
 }
@@ -78,6 +80,8 @@ function readControllerStick(gamepad: Gamepad): StickAxes {
  *
  * All movement is applied through `XrLocomotion`, so the player rig moves
  * instead of the camera and the real room-scale offset is preserved.
+ * In AR mode the movementAllowed gate disables everything but reads the sticks
+ * (and keeps debug state visible).
  */
 export class XrStickLocomotion {
   private readonly options: XrStickLocomotionOptions;
@@ -138,7 +142,7 @@ export class XrStickLocomotion {
     this.leftStick = this.virtualLeft ?? this.readStick('left');
     this.rightStick = this.virtualRight ?? this.readStick('right');
 
-    if (!this.options.isActive() || this.options.isBlocked()) {
+    if (!this.options.isActive() || !this.options.movementAllowed() || this.options.isBlocked()) {
       this.velocity.set(0, 0, 0);
       this.snapArmed = true;
       this.abortTeleport();
